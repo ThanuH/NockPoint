@@ -1,0 +1,280 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------------------------------------------
+// 1. TOURNAMENT ROOT
+// -------------------------------------------------------------
+model Tournament {
+  id             String         @id @default(cuid())
+  code           String         @unique // e.g. "WA-2026-NAT"
+  name           String
+  location       String?
+  venue          String?
+  startDate      DateTime
+  endDate        DateTime
+  ruleset        String         @default("WA_720") // "WA_720", "WA_1440", "WA_INDOOR_18M", "CUSTOM"
+  
+  // Custom Rules: Multi-Class Participation Mode
+  // "SINGLE_STRICT"     = Standard legacy Ianseo (1 archer = 1 class)
+  // "SEPARATE_SESSIONS" = Archer can shoot twice in different sessions
+  // "SHARED_SCORE"      = Single 720 score counts toward multiple age classes
+  // "BOTH"              = Full freedom
+  multiClassMode String         @default("BOTH")
+  
+  // Scoring definitions
+  goldsLabel     String         @default("10+X") // e.g., "10+X" for outdoor, "10/9" for indoor compound
+  xnineLabel     String         @default("X")
+  
+  isLocked       Boolean        @default(false)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  sessions       Session[]
+  divisions      Division[]
+  ageClasses     AgeClass[]
+  distanceRules  DistanceRule[]
+  clubs          Club[]
+  registrations  TournamentRegistration[]
+
+  @@map("tournaments")
+}
+
+// -------------------------------------------------------------
+// 2. SESSIONS (Shooting Lines)
+// -------------------------------------------------------------
+model Session {
+  id              String      @id @default(cuid())
+  tournamentId    String
+  sessionNum      Int         // 1, 2, 3...
+  name            String      // e.g. "Day 1 - Morning Qualification"
+  stage           String      @default("QUALIFICATION") // QUALIFICATION, ELIMINATION, FINAL
+  date            DateTime?
+  maxBales        Int         @default(30) // Bales 1..30
+  archersPerBale  Int         @default(4)  // 4 = A, B, C, D (or 2 = A, B)
+  
+  tournament      Tournament               @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  registrations   TournamentRegistration[]
+
+  @@unique([tournamentId, sessionNum, stage])
+  @@map("sessions")
+}
+
+// -------------------------------------------------------------
+// 3. DIVISIONS (Bow Styles: R, C, B, L, T)
+// -------------------------------------------------------------
+model Division {
+  id              String         @id @default(cuid())
+  tournamentId    String
+  code            String         // "R", "C", "B", "L", "T"
+  name            String         // "Recurve", "Compound", "Barebow"
+  sortOrder       Int            @default(0)
+
+  tournament      Tournament     @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  distanceRules   DistanceRule[]
+
+  @@unique([tournamentId, code])
+  @@map("divisions")
+}
+
+// -------------------------------------------------------------
+// 4. AGE CLASSES (Age Groups & Shoot-Up Eligibility)
+// -------------------------------------------------------------
+model AgeClass {
+  id                  String         @id @default(cuid())
+  tournamentId        String
+  code                String         // "U15M", "U18M", "U21M", "OPEN_M", "50+M"
+  name                String         // "Under 18 Men", "Open Women"
+  gender              String         // "M", "W", "X"
+  minAge              Int?           // Optional age boundary
+  maxAge              Int?           // e.g., 17 for U18
+  
+  // Array of class codes this class is legally allowed to shoot up into
+  // e.g., for U18M: ["U21M", "OPEN_M"]
+  validShootUpClasses String[]       @default([])
+  sortOrder           Int            @default(0)
+
+  tournament          Tournament     @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  distanceRules       DistanceRule[]
+
+  @@unique([tournamentId, code])
+  @@map("age_classes")
+}
+
+// -------------------------------------------------------------
+// 5. TARGET FACES (Geometry & Ring Scoring Rules)
+// -------------------------------------------------------------
+model TargetFace {
+  id             String         @id @default(cuid())
+  code           String         @unique // "FACE_122", "FACE_80_6RING", "FACE_40_TRIPLE", "FACE_40_FULL"
+  name           String
+  diameterCm     Float          // 122.0, 80.0, 40.0
+  innerRingVal   Int            @default(10) // 10 (or 11 for X)
+  outerRingVal   Int            @default(1)  // 1 for full face, 5 or 6 for spot faces
+  innerTenIsX    Boolean        @default(true)
+  xNineIsGolds   Boolean        @default(false)
+  scoringType    String         @default("STANDARD_10_RING") // "STANDARD_10_RING", "COMPOUND_6_RING", "INDOOR_TRIPLE_SPOT"
+
+  distanceRules  DistanceRule[]
+
+  @@map("target_faces")
+}
+
+// -------------------------------------------------------------
+// 6. DISTANCE RULES (Distance, Target Face & Arrows Matrix)
+// -------------------------------------------------------------
+model DistanceRule {
+  id              String      @id @default(cuid())
+  tournamentId    String
+  divisionId      String
+  ageClassId      String
+  targetFaceId    String
+  
+  distanceNumber  Int         // 1 (Distance 1), 2 (Distance 2)
+  distanceMeters  Float       // 70.0, 50.0, 18.0
+  endsCount       Int         @default(6) // 6 ends of 6 arrows = 36 arrows
+  arrowsPerEnd    Int         @default(6) // 6 (outdoor) or 3 (indoor)
+  maxScore        Int         @default(360)
+
+  tournament      Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  division        Division    @relation(fields: [divisionId], references: [id], onDelete: Cascade)
+  ageClass        AgeClass    @relation(fields: [ageClassId], references: [id], onDelete: Cascade)
+  targetFace      TargetFace  @relation(fields: [targetFaceId], references: [id], onDelete: Restrict)
+
+  @@unique([tournamentId, divisionId, ageClassId, distanceNumber])
+  @@map("distance_rules")
+}
+
+// -------------------------------------------------------------
+// 7. RULESET PRESETS (Built-in & User-Created Federation Rules)
+// -------------------------------------------------------------
+model Ruleset {
+  id          String   @id @default(cuid())
+  code        String   @unique // e.g. "WA_720", "SL_SENIOR_NATIONALS", "CUSTOM_CLUB_2026"
+  name        String
+  description String?
+  isBuiltIn   Boolean  @default(false)
+  goldsLabel  String   @default("10+X")
+  xnineLabel  String   @default("X")
+  configJson  Json     // { defaultSessions, divisions, ageClasses, distanceMatrix }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("rulesets")
+}
+
+// -------------------------------------------------------------
+// 8. CLUBS / COUNTRIES (Represented Organizations)
+// -------------------------------------------------------------
+model Club {
+  id            String                   @id @default(cuid())
+  tournamentId  String
+  code          String                   // e.g. "COL", "KAC", "SLAA", "SRI"
+  name          String                   // e.g. "Colombo Archery Club"
+  iocCode       String?                  // e.g. "SRI"
+  createdAt     DateTime                 @default(now())
+
+  tournament    Tournament               @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  registrations TournamentRegistration[]
+
+  @@unique([tournamentId, code])
+  @@map("clubs")
+}
+
+// -------------------------------------------------------------
+// 9. ARCHERS (Unique Human Athlete Profile)
+// -------------------------------------------------------------
+model Archer {
+  id            String                   @id @default(cuid())
+  bibCode       String                   @unique // Federation ID, NIC/Passport, or auto-generated bib
+  firstName     String
+  lastName      String
+  gender        String                   // "M", "W", "X"
+  birthDate     DateTime?
+  email         String?
+  phone         String?
+  photoUrl      String?
+  isWheelchair  Boolean                  @default(false)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+
+  registrations TournamentRegistration[]
+
+  @@map("archers")
+}
+
+// -------------------------------------------------------------
+// 10. TOURNAMENT REGISTRATIONS (Physical Shooting Slots)
+// -------------------------------------------------------------
+// One Archer can hold 1..N TournamentRegistrations across DIFFERENT sessions
+// (Separate Sessions mode). Scores are NEVER aggregated across registrations.
+model TournamentRegistration {
+  id                       String                 @id @default(cuid())
+  tournamentId             String
+  archerId                 String
+  clubId                   String?
+  sessionId                String?
+
+  divisionCode             String                 // Primary bow division for this shooting slot
+  primaryClassCode         String                 // Primary age class for this shooting slot
+
+  // Target assignment (set by Auto-Draw or manual assignment)
+  baleNumber               Int?                   // e.g. 5
+  targetLetter             String?                // "A", "B", "C", "D"
+  targetNoFormatted        String?                // e.g. "1005A" (Session 1, Bale 005, Position A)
+  bowSharingGroup          String?                // Optional tag for novices sharing a bow
+
+  // Cached qualification totals for THIS shooting slot only
+  totalScore               Int                    @default(0)
+  totalHits                Int                    @default(0)
+  totalGolds               Int                    @default(0)
+  totalXnines              Int                    @default(0)
+
+  // Accreditation & Check-In state
+  status                   String                 @default("ACTIVE") // ACTIVE, DNS, DNF, DSQ, WITHDRAWN
+  feePaid                  Boolean                @default(false)
+  parentalApprovalReceived Boolean                @default(false)
+  checkedInAt              DateTime?
+  equipmentInspectedAt     DateTime?
+
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+
+  tournament               Tournament             @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  archer                   Archer                 @relation(fields: [archerId], references: [id], onDelete: Cascade)
+  club                     Club?                  @relation(fields: [clubId], references: [id], onDelete: SetNull)
+  session                  Session?               @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  categories               RegistrationCategory[]
+
+  // Anti-collision guarantees:
+  // 1. Same archer cannot hold two shooting slots in the same session
+  @@unique([tournamentId, archerId, sessionId])
+  // 2. Two archers cannot occupy the exact same bale + letter in the same session
+  @@unique([tournamentId, sessionId, baleNumber, targetLetter])
+  @@map("tournament_registrations")
+}
+
+// -------------------------------------------------------------
+// 11. REGISTRATION CATEGORIES (Shared-Score Multi-Class Links)
+// -------------------------------------------------------------
+// Allows a single TournamentRegistration (1 shooting slot / 1 score)
+// to be ranked independently in 1..N eligible age classes.
+model RegistrationCategory {
+  id             String                 @id @default(cuid())
+  registrationId String
+  divisionCode   String
+  classCode      String
+  isPrimary      Boolean                @default(false)
+  categoryRank   Int                    @default(0)
+  tieFlag        Boolean                @default(false)
+
+  registration   TournamentRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@unique([registrationId, divisionCode, classCode])
+  @@map("registration_categories")
+}
